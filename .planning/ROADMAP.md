@@ -28,12 +28,12 @@ The pipeline is built in six sequential phases, each delivering a complete, inde
   1. Manually triggering the workflow from the GitHub Actions UI with a `contact_id` and `contact_email` causes the job to start and complete without errors (even though data scripts are stubs)
   2. `prompt_template.md` exists in the repo root and contains all `{{token.name}}` placeholders from `staff_domain_ASOTOS_prompt.md`
   3. `scripts/lib/` contains `api_client.py`, `dlq_writer.py`, and `file_io.py` importable by all main scripts
-  4. `requirements.txt` lists all 7 dependencies with exact `==` version pins and installs cleanly on `ubuntu-latest`
-**Plans:** TBD
+  4. `requirements.txt` lists all 9 dependencies with exact `==` version pins and installs cleanly on `ubuntu-latest`
+**Plans:** 2 plans
 
 Plans:
-- [ ] 01-01: Workflow YAML, project layout, and requirements.txt
-- [ ] 01-02: Shared lib utilities and prompt template migration
+- [ ] 01-01-PLAN.md — Workflow YAML, project layout, and requirements.txt
+- [ ] 01-02-PLAN.md — Shared lib utilities and prompt template migration
 
 ### Phase 2: Data Fetch
 **Goal:** Real HubSpot contact data (properties + engagement history + deals + owner names, all with `updatedAt` timestamps) and Chorus AI transcripts (or an explicit sentinel) are written to `$RUNNER_TEMP` as structured JSON files

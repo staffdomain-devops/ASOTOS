@@ -60,7 +60,7 @@
 ### Project Structure
 
 - [ ] **PROJ-01**: `prompt_template.md` contains the full ASOTOS campaign prompt (from `staff_domain_ASOTOS_prompt.md`) with `{{token.name}}` placeholders
-- [ ] **PROJ-02**: `requirements.txt` uses exact version pins (`==`) for all 7 dependencies for reproducible CI
+- [ ] **PROJ-02**: `requirements.txt` uses exact version pins (`==`) for all 9 dependencies for reproducible CI
 - [ ] **PROJ-03**: Shared retry/DLQ utilities extracted to `scripts/lib/` to avoid duplication across the 5 main scripts
 
 ## v2 Requirements
