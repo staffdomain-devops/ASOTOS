@@ -1,4 +1,4 @@
-"""Tenacity retry decorators for HubSpot, Chorus, and Anthropic API calls."""
+"""Tenacity retry decorators for HubSpot and Anthropic API calls."""
 from tenacity import (
     retry,
     retry_if_exception,
@@ -21,16 +21,6 @@ def _is_retryable_hubspot(exc):
     return False
 
 
-def _is_retryable_chorus(exc):
-    try:
-        import requests
-        if isinstance(exc, requests.HTTPError):
-            return exc.response is not None and exc.response.status_code in (429, 500, 502, 503, 504)
-    except ImportError:
-        pass
-    return False
-
-
 def _is_retryable_anthropic(exc):
     try:
         from anthropic import RateLimitError, APIStatusError
@@ -45,13 +35,6 @@ def _is_retryable_anthropic(exc):
 
 hubspot_retry = retry(
     retry=retry_if_exception(_is_retryable_hubspot),
-    stop=_RETRY_STOP,
-    wait=_RETRY_WAIT,
-    reraise=True,
-)
-
-chorus_retry = retry(
-    retry=retry_if_exception(_is_retryable_chorus),
     stop=_RETRY_STOP,
     wait=_RETRY_WAIT,
     reraise=True,

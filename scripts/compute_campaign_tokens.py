@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """compute_campaign_tokens.py — Phase 3: Token Computation.
 
-Reads hubspot_contacts.json and chorus_transcripts.json from RUNNER_TEMP.
+Reads hubspot_contacts.json from RUNNER_TEMP.
 Computes all prompt tokens with freshness tiers and secondary contact selection.
 Validates tokens via Jinja2 StrictUndefined test render (result discarded).
 Writes campaign_tokens.json to RUNNER_TEMP (batch dict keyed by contact_id).
@@ -21,7 +21,6 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined, UndefinedErro
 CONTACT_IDS = os.environ.get("CONTACT_IDS", "[]")
 CONTACT_EMAILS = os.environ.get("CONTACT_EMAILS", "[]")
 REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-SENTINEL_CHORUS = {"transcript_available": False, "conversations": []}
 
 _EXCLUDED_TITLE_KEYWORDS = [
     "executive assistant", "personal assistant", " pa ", "pa,", "pa)",
@@ -164,7 +163,7 @@ def select_secondary_contact(primary_jobtitle: str, related_contacts: list) -> s
     return first_name if first_name else "null"
 
 
-def assemble_activity_history(email_engagements: list, meeting_engagements: list, chorus_data: dict) -> str:
+def assemble_activity_history(email_engagements: list, meeting_engagements: list) -> str:
     lines = []
 
     lines.append("=== EMAIL HISTORY ===")
@@ -205,40 +204,6 @@ def assemble_activity_history(email_engagements: list, meeting_engagements: list
     else:
         lines.append("No meeting history.")
         lines.append("")
-
-    lines.append("=== CHORUS TRANSCRIPTS ===")
-    transcripts = chorus_data.get("transcripts")
-    conversations = chorus_data.get("conversations")
-    if transcripts:
-        for t in transcripts:
-            ts = (t.get("date") or "")
-            date_part = ts[:10] if ts else "unknown date"
-            freshness = _freshness_label(ts) if ts else "unknown date"
-            title = t.get("title") or "Transcript"
-            text = (t.get("transcript") or "")[:2000]
-            lines.append(f"[{date_part}] ({freshness}) TRANSCRIPT — {title}")
-            if text:
-                lines.append(text)
-            lines.append("")
-    elif conversations:
-        for t in conversations:
-            if not t.get("available", False):
-                continue
-            ts = (t.get("date_time") or "")
-            date_part = ts[:10] if ts else "unknown date"
-            freshness = _freshness_label(ts) if ts else "unknown date"
-            title = t.get("meeting_title") or "Transcript"
-            text = (t.get("transcript") or "")[:2000]
-            lines.append(f"[{date_part}] ({freshness}) TRANSCRIPT — {title}")
-            if text:
-                lines.append(text)
-            lines.append("")
-    elif chorus_data.get("transcript_available") is False:
-        status = chorus_data.get("transcript_status") or "unavailable"
-        lines.append(f"No Chorus transcripts available ({status}).")
-        lines.append("Do not reference call content — base STATE classification on email and meeting history only.")
-    else:
-        lines.append("No Chorus transcripts.")
 
     return "\n".join(lines)
 
@@ -286,7 +251,6 @@ def main():
     email_map = dict(zip(contact_ids, contact_emails_list))
 
     hubspot_batch = read_json("hubspot_contacts.json")
-    chorus_batch = read_json("chorus_transcripts.json")
 
     env = Environment(loader=FileSystemLoader(REPO_ROOT), undefined=StrictUndefined)
     template = env.get_template("prompt_reasoning.md")
@@ -298,7 +262,6 @@ def main():
         contact_email = email_map.get(contact_id, "")
         try:
             contact = hubspot_batch.get(contact_id, {})
-            chorus = chorus_batch.get(contact_id, SENTINEL_CHORUS)
 
             props = contact.get("properties", {})
             props_updated_at = contact.get("properties_updated_at", {})
@@ -332,7 +295,6 @@ def main():
                     "full_activity_history": assemble_activity_history(
                         email_engagements=contact.get("email_engagements", []),
                         meeting_engagements=contact.get("meeting_engagements", []),
-                        chorus_data=chorus,
                     ),
                     "deals_history": format_deals(contact.get("deals", [])),
                 },

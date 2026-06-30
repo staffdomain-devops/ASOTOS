@@ -19,7 +19,6 @@ jobs:
       CONTACT_IDS: ${{ inputs.contact_ids }}
       CONTACT_EMAILS: ${{ inputs.contact_emails }}
       HUBSPOT_API_KEY: ${{ secrets.HUBSPOT_API_KEY }}
-      CHORUS_API_TOKEN: ${{ secrets.CHORUS_API_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
       RUNNER_TEMP: ${{ runner.temp }}
@@ -39,9 +38,6 @@ jobs:
 
       - name: Fetch HubSpot contacts
         run: python scripts/fetch_hubspot.py
-
-      - name: Fetch Chorus transcripts
-        run: python scripts/fetch_chorus.py
 
       - name: Compute campaign tokens
         run: python scripts/compute_campaign_tokens.py
