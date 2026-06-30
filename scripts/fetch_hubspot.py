@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """fetch_hubspot.py — Phase 2: fetch contact, engagements, deals, related contacts, and owner from HubSpot.
 
-Output: hubspot_contact.json written to RUNNER_TEMP.
+Output: hubspot_contacts.json written to RUNNER_TEMP (batch dict keyed by contact_id).
 """
 import datetime
+import json
 import os
 import re
 import sys
@@ -14,11 +15,11 @@ from bs4 import BeautifulSoup
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 from api_client import hubspot_retry
-from dlq_writer import write_dlq
+from dlq_writer import write_dlq, append_dlq
 from file_io import write_json
 
-CONTACT_ID = os.environ.get("CONTACT_ID", "")
-CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "")
+CONTACT_IDS = os.environ.get("CONTACT_IDS", "[]")
+CONTACT_EMAILS = os.environ.get("CONTACT_EMAILS", "[]")
 
 TWELVE_MONTHS_AGO_MS = str(int(
     (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=365)).timestamp() * 1000
@@ -65,18 +66,15 @@ def _dt_to_iso(dt) -> str | None:
 
 @hubspot_retry
 def fetch_contact_properties(client, contact_id: str):
-    return client.crm.contacts.basic_api.get_by_id(
+    contact = client.crm.contacts.basic_api.get_by_id(
         contact_id=contact_id,
         properties=CONTACT_PROPERTIES,
     )
-
-
-@hubspot_retry
-def fetch_contact_history(client, contact_id: str):
-    return client.crm.contacts.basic_api.get_by_id(
+    contact_history = client.crm.contacts.basic_api.get_by_id(
         contact_id=contact_id,
         properties_with_history=["name_of_target_role", "jobtitle", "name_of_target_role_last_updated"],
     )
+    return contact, contact_history
 
 
 @hubspot_retry
@@ -378,6 +376,7 @@ def assemble_output(
     deals: list,
     related: list,
     owner: dict | None,
+    contact_id: str,
 ) -> dict:
     props = contact.properties or {}
 
@@ -403,7 +402,7 @@ def assemble_output(
         }
 
     return {
-        "contact_id": str(CONTACT_ID),
+        "contact_id": str(contact_id),
         "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "properties": {
             "firstname": props.get("firstname") or "",
@@ -440,75 +439,52 @@ def assemble_output(
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    print(f"[fetch_hubspot] processing contact_id={CONTACT_ID}", flush=True)
-    if not CONTACT_ID:
-        raise ValueError("CONTACT_ID environment variable is required")
+def main():
+    contact_ids = json.loads(os.environ["CONTACT_IDS"])
+    contact_emails = json.loads(os.environ["CONTACT_EMAILS"])
 
     client = hubspot.Client.create(access_token=os.environ["HUBSPOT_API_KEY"])
 
-    # 1. Contact properties
-    contact = fetch_contact_properties(client, CONTACT_ID)
-    print(
-        f"[fetch_hubspot] contact fetched: "
-        f"{contact.properties.get('firstname')} {contact.properties.get('lastname')} "
-        f"@ {contact.properties.get('company')}",
-        flush=True,
-    )
+    results = {"_contact_ids": contact_ids}
+    failures = []
 
-    # 2. Properties with history (for freshness tiers)
-    contact_history = fetch_contact_history(client, CONTACT_ID)
+    for contact_id, contact_email in zip(contact_ids, contact_emails):
+        print(f"[fetch_hubspot] processing contact_id={contact_id}", flush=True)
+        try:
+            contact, contact_history = fetch_contact_properties(client, contact_id)
+            emails = fetch_email_engagements(client, contact_id)
+            meetings_search = fetch_meeting_engagements(client, contact_id)
+            meeting_ids_v4 = fetch_meeting_ids_v4(client, contact_id)
+            meetings = merge_meetings(client, meetings_search, meeting_ids_v4)
+            deals = fetch_deals(client, contact_id)
+            company_id = contact.properties.get("associatedcompanyid")
+            related = fetch_related_contacts(client, contact_id, company_id) if company_id else []
+            owner_id = contact.properties.get("hubspot_owner_id")
+            owner = fetch_owner(client, owner_id) if owner_id else None
+            output = assemble_output(contact, contact_history, emails, meetings, deals, related, owner, contact_id)
+            results[contact_id] = output
+            print(f"[fetch_hubspot] contact_id={contact_id} OK — {len(emails)} emails, {len(meetings)} meetings, {len(deals)} deals", flush=True)
+        except Exception as e:
+            print(f"[fetch_hubspot] ERROR contact_id={contact_id}: {e}", file=sys.stderr, flush=True)
+            append_dlq(contact_id, contact_email, "fetch_hubspot", str(e))
+            failures.append(contact_id)
 
-    # 3. Email engagements (CRM search, last 12 months)
-    emails = fetch_email_engagements(client, CONTACT_ID)
-    print(f"[fetch_hubspot] email engagements: {len(emails)}", flush=True)
+    write_json("hubspot_contacts.json", results)
+    print(f"[fetch_hubspot] hubspot_contacts.json written: {len(contact_ids) - len(failures)}/{len(contact_ids)} succeeded", flush=True)
 
-    # 4. Meeting engagements (CRM search + v4 associations merge)
-    meetings_search = fetch_meeting_engagements(client, CONTACT_ID)
-    try:
-        v4_meeting_ids = fetch_meeting_ids_v4(client, CONTACT_ID)
-    except Exception as e:
-        print(f"[fetch_hubspot] WARNING: v4 meeting associations failed: {e}", flush=True)
-        v4_meeting_ids = []
-    meetings = merge_meetings(client, meetings_search, v4_meeting_ids)
-    print(f"[fetch_hubspot] meeting engagements: {len(meetings)}", flush=True)
-
-    # 5. Deals
-    try:
-        deals = fetch_deals(client, CONTACT_ID)
-    except Exception as e:
-        print(f"[fetch_hubspot] WARNING: deals fetch failed: {e}", flush=True)
-        deals = []
-    print(f"[fetch_hubspot] deals: {len(deals)}", flush=True)
-
-    # 6. Related contacts (via company association)
-    company_id = (contact.properties or {}).get("associatedcompanyid") or ""
-    try:
-        related = fetch_related_contacts(client, CONTACT_ID, company_id)
-    except Exception as e:
-        print(f"[fetch_hubspot] WARNING: related contacts fetch failed: {e}", flush=True)
-        related = []
-    print(f"[fetch_hubspot] related contacts: {len(related)}", flush=True)
-
-    # 7. Owner
-    owner_id = (contact.properties or {}).get("hubspot_owner_id") or ""
-    owner = None
-    if owner_id:
-        owner = fetch_owner(client, owner_id)
-
-    # 8. Assemble and write
-    output = assemble_output(contact, contact_history, emails, meetings, deals, related, owner)
-    write_json("hubspot_contact.json", output)
-    print(
-        f"[fetch_hubspot] hubspot_contact.json written — "
-        f"{len(emails)} emails, {len(meetings)} meetings, {len(deals)} deals, {len(related)} related contacts",
-        flush=True,
-    )
+    if failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
     try:
         main()
+    except SystemExit:
+        raise
     except Exception as e:
-        write_dlq(CONTACT_ID, CONTACT_EMAIL, "fetch_hubspot", str(e))
+        try:
+            for cid, cem in zip(json.loads(CONTACT_IDS), json.loads(CONTACT_EMAILS)):
+                append_dlq(cid, cem, "fetch_hubspot", str(e))
+        except Exception:
+            pass
         raise SystemExit(1)

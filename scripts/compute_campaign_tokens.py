@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """compute_campaign_tokens.py — Phase 3: Token Computation.
 
-Reads hubspot_contact.json and chorus_transcripts.json from RUNNER_TEMP.
+Reads hubspot_contacts.json and chorus_transcripts.json from RUNNER_TEMP.
 Computes all prompt tokens with freshness tiers and secondary contact selection.
 Validates tokens via Jinja2 StrictUndefined test render (result discarded).
-Writes campaign_tokens.json to RUNNER_TEMP.
+Writes campaign_tokens.json to RUNNER_TEMP (batch dict keyed by contact_id).
 """
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -13,13 +14,14 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
 from file_io import read_json, write_json
-from dlq_writer import write_dlq
+from dlq_writer import write_dlq, append_dlq
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, UndefinedError
 
-CONTACT_ID = os.environ.get("CONTACT_ID", "")
-CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "")
+CONTACT_IDS = os.environ.get("CONTACT_IDS", "[]")
+CONTACT_EMAILS = os.environ.get("CONTACT_EMAILS", "[]")
 REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+SENTINEL_CHORUS = {"transcript_available": False, "conversations": []}
 
 _EXCLUDED_TITLE_KEYWORDS = [
     "executive assistant", "personal assistant", " pa ", "pa,", "pa)",
@@ -278,79 +280,102 @@ def validate_required_tokens(tokens: dict) -> None:
         raise ValueError(f"Required tokens missing or empty: {', '.join(missing)}")
 
 
-def main() -> None:
-    contact = read_json("hubspot_contact.json")
-    chorus = read_json("chorus_transcripts.json")
+def main():
+    contact_ids = json.loads(os.environ.get("CONTACT_IDS", "[]"))
+    contact_emails_list = json.loads(os.environ.get("CONTACT_EMAILS", "[]"))
+    email_map = dict(zip(contact_ids, contact_emails_list))
 
-    props = contact.get("properties", {})
-    props_updated_at = contact.get("properties_updated_at", {})
+    hubspot_batch = read_json("hubspot_contacts.json")
+    chorus_batch = read_json("chorus_transcripts.json")
 
-    tokens = {
-        "contact": {
-            "first_name": props.get("firstname") or "",
-            "last_name": props.get("lastname") or "",
-            "company": props.get("company") or "",
-            "industry": props.get("industry") or "",
-            "jobtitle": props.get("jobtitle") or "",
-            "website": props.get("website") or "",
-            "numberofemployees": props.get("numberofemployees") or "",
-            "company_locations": props.get("company_locations") or "",
-            "years_in_crm": compute_years_in_crm(contact.get("contact_created_at") or ""),
-            "outreach_attempt_count": compute_outreach_count(
-                contact.get("email_engagements", []),
-                contact.get("meeting_engagements", []),
-            ),
-            "related_contacts": format_related_contacts(contact.get("related_contacts_detail", [])),
-            "secondary_contact_name": select_secondary_contact(
-                primary_jobtitle=props.get("jobtitle") or "",
-                related_contacts=contact.get("related_contacts_detail", []),
-            ),
-            "name_of_target_role": props.get("name_of_target_role") or "Not specified",
-            "name_of_target_role_last_updated": format_timestamp_with_age(
-                props_updated_at.get("name_of_target_role") or ""
-            ),
-        },
-        "crm": {
-            "full_activity_history": assemble_activity_history(
-                email_engagements=contact.get("email_engagements", []),
-                meeting_engagements=contact.get("meeting_engagements", []),
-                chorus_data=chorus,
-            ),
-            "deals_history": format_deals(contact.get("deals", [])),
-        },
-        "industry": {
-            "market_intelligence": props.get("industry_market_intelligence") or "",
-        },
-        "company": {
-            "observable_signals": props.get("company_observable_signals") or "",
-        },
-    }
+    env = Environment(loader=FileSystemLoader(REPO_ROOT), undefined=StrictUndefined)
+    template = env.get_template("prompt_reasoning.md")
 
-    validate_required_tokens(tokens)
+    results = {"_contact_ids": contact_ids}
+    failures = []
 
-    env = Environment(
-        loader=FileSystemLoader(REPO_ROOT),
-        undefined=StrictUndefined,
-    )
-    template = env.get_template("prompt_template.md")
-    try:
-        template.render(**tokens)
-    except UndefinedError as e:
-        print(f"[compute_campaign_tokens] VALIDATION FAILED — missing token: {e}", file=sys.stderr)
-        raise
+    for contact_id in contact_ids:
+        contact_email = email_map.get(contact_id, "")
+        try:
+            contact = hubspot_batch.get(contact_id, {})
+            chorus = chorus_batch.get(contact_id, SENTINEL_CHORUS)
 
-    write_json("campaign_tokens.json", tokens)
-    print(
-        f"[compute_campaign_tokens] campaign_tokens.json written — "
-        f"secondary={tokens['contact']['secondary_contact_name']}, "
-        f"years_in_crm={tokens['contact']['years_in_crm']}, "
-        f"outreach_count={tokens['contact']['outreach_attempt_count']}"
-    )
+            props = contact.get("properties", {})
+            props_updated_at = contact.get("properties_updated_at", {})
+
+            tokens = {
+                "contact": {
+                    "first_name": props.get("firstname") or "",
+                    "last_name": props.get("lastname") or "",
+                    "company": props.get("company") or "",
+                    "industry": props.get("industry") or "",
+                    "jobtitle": props.get("jobtitle") or "",
+                    "website": props.get("website") or "",
+                    "numberofemployees": props.get("numberofemployees") or "",
+                    "company_locations": props.get("company_locations") or "",
+                    "years_in_crm": compute_years_in_crm(contact.get("contact_created_at") or ""),
+                    "outreach_attempt_count": compute_outreach_count(
+                        contact.get("email_engagements", []),
+                        contact.get("meeting_engagements", []),
+                    ),
+                    "related_contacts": format_related_contacts(contact.get("related_contacts_detail", [])),
+                    "secondary_contact_name": select_secondary_contact(
+                        primary_jobtitle=props.get("jobtitle") or "",
+                        related_contacts=contact.get("related_contacts_detail", []),
+                    ),
+                    "name_of_target_role": props.get("name_of_target_role") or "Not specified",
+                    "name_of_target_role_last_updated": format_timestamp_with_age(
+                        props_updated_at.get("name_of_target_role") or ""
+                    ),
+                },
+                "crm": {
+                    "full_activity_history": assemble_activity_history(
+                        email_engagements=contact.get("email_engagements", []),
+                        meeting_engagements=contact.get("meeting_engagements", []),
+                        chorus_data=chorus,
+                    ),
+                    "deals_history": format_deals(contact.get("deals", [])),
+                },
+                "industry": {
+                    "market_intelligence": props.get("industry_market_intelligence") or "",
+                },
+                "company": {
+                    "observable_signals": props.get("company_observable_signals") or "",
+                },
+            }
+
+            validate_required_tokens(tokens)
+
+            try:
+                template.render(**tokens)
+            except UndefinedError as e:
+                print(f"[compute_campaign_tokens] VALIDATION FAILED contact_id={contact_id}: {e}", file=sys.stderr)
+                raise
+
+            results[contact_id] = tokens
+            print(f"[compute_campaign_tokens] contact_id={contact_id} OK — secondary={tokens['contact']['secondary_contact_name']}", flush=True)
+
+        except Exception as e:
+            print(f"[compute_campaign_tokens] ERROR contact_id={contact_id}: {e}", file=sys.stderr, flush=True)
+            append_dlq(contact_id, contact_email, "compute_campaign_tokens", str(e))
+            failures.append(contact_id)
+
+    write_json("campaign_tokens.json", results)
+    print(f"[compute_campaign_tokens] campaign_tokens.json written: {len(contact_ids) - len(failures)}/{len(contact_ids)} succeeded", flush=True)
+
+    if failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
     try:
         main()
+    except SystemExit:
+        raise
     except Exception as e:
-        write_dlq(CONTACT_ID, CONTACT_EMAIL, "compute_campaign_tokens", str(e))
+        try:
+            for cid, cem in zip(json.loads(CONTACT_IDS), json.loads(CONTACT_EMAILS)):
+                append_dlq(cid, cem, "compute_campaign_tokens", str(e))
+        except Exception:
+            pass
         raise SystemExit(1)

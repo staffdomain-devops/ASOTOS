@@ -3,12 +3,12 @@ name: ASOTOS Campaign Generator
 on:
   workflow_dispatch:
     inputs:
-      contact_id:
-        description: HubSpot contact ID
+      contact_ids:
+        description: 'JSON array of HubSpot contact IDs e.g. ["12345","67890"]'
         required: true
         type: string
-      contact_email:
-        description: HubSpot contact email (for logging)
+      contact_emails:
+        description: 'JSON array of contact emails (for DLQ/logging) e.g. ["a@b.com","c@d.com"]'
         required: true
         type: string
 
@@ -16,8 +16,8 @@ jobs:
   generate-campaign:
     runs-on: ubuntu-latest
     env:
-      CONTACT_ID: ${{ inputs.contact_id }}
-      CONTACT_EMAIL: ${{ inputs.contact_email }}
+      CONTACT_IDS: ${{ inputs.contact_ids }}
+      CONTACT_EMAILS: ${{ inputs.contact_emails }}
       HUBSPOT_API_KEY: ${{ secrets.HUBSPOT_API_KEY }}
       CHORUS_API_TOKEN: ${{ secrets.CHORUS_API_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -37,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Fetch HubSpot contact
+      - name: Fetch HubSpot contacts
         run: python scripts/fetch_hubspot.py
 
       - name: Fetch Chorus transcripts
@@ -46,38 +46,40 @@ jobs:
       - name: Compute campaign tokens
         run: python scripts/compute_campaign_tokens.py
 
-      - name: Generate campaign
-        run: python scripts/generate_campaign.py
+      - name: Generate reasoning
+        run: python scripts/generate_reasoning.py
 
-      - name: Write campaign to HubSpot
+      - name: Generate emails
+        run: python scripts/generate_emails.py
+
+      - name: Write campaigns to HubSpot
         run: python scripts/write_hubspot.py
 
       - name: Upload output artifact
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: campaign-output-${{ inputs.contact_id }}
+          name: campaign-output-${{ github.run_id }}
           path: ${{ runner.temp }}/campaign_output.json
           retention-days: 7
 
       - name: Copy failed contacts log
-        if: failure()
-        run: cp "${{ runner.temp }}/failed_contacts.json" failed_contacts.json 2>/dev/null || echo '{}' > failed_contacts.json
+        if: always()
+        run: cp "${{ runner.temp }}/failed_contacts.json" failed_contacts.json 2>/dev/null || echo '[]' > failed_contacts.json
 
       - name: Upload failure artifact
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: failed-contacts-${{ inputs.contact_id }}
+          name: failed-contacts-${{ github.run_id }}
           path: failed_contacts.json
           retention-days: 7
 
       - name: Notify Teams on failure
         if: failure()
         run: |
-          FAILED_STEP=$(cat "${{ runner.temp }}/failed_contacts.json" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('failed_step','unknown'))" 2>/dev/null || echo "unknown")
-          ERROR_MSG=$(cat "${{ runner.temp }}/failed_contacts.json" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error_message','')[:300])" 2>/dev/null || echo "")
-          CONTACT_EMAIL="${{ inputs.contact_email }}"
+          FAIL_COUNT=$(cat "${{ runner.temp }}/failed_contacts.json" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else 1)" 2>/dev/null || echo "?")
+          FIRST_ERROR=$(cat "${{ runner.temp }}/failed_contacts.json" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); rec=d[0] if isinstance(d,list) and d else d; print(f\"{rec.get('contact_email','?')} — {rec.get('failed_step','?')}: {rec.get('error_message','')[:200]}\")" 2>/dev/null || echo "see artifact")
           curl -s -X POST "${{ secrets.TEAMS_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -d "{
@@ -85,12 +87,11 @@ jobs:
               \"@context\": \"https://schema.org/extensions\",
               \"summary\": \"ASOTOS pipeline failed\",
               \"themeColor\": \"FF0000\",
-              \"title\": \"ASOTOS pipeline failed — ${CONTACT_EMAIL}\",
+              \"title\": \"ASOTOS pipeline failed — ${FAIL_COUNT} contact(s)\",
               \"sections\": [{
                 \"facts\": [
-                  {\"name\": \"Contact\", \"value\": \"${CONTACT_EMAIL}\"},
-                  {\"name\": \"Failed step\", \"value\": \"${FAILED_STEP}\"},
-                  {\"name\": \"Error\", \"value\": \"${ERROR_MSG}\"},
+                  {\"name\": \"Failed contacts\", \"value\": \"${FAIL_COUNT}\"},
+                  {\"name\": \"First error\", \"value\": \"${FIRST_ERROR}\"},
                   {\"name\": \"Run log\", \"value\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}
                 ]
               }]

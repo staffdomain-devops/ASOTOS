@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """fetch_chorus.py — Phase 2: extract Chorus AI transcript IDs from meeting notes and fetch transcripts."""
+import json
 import os
 import sys
 import re
@@ -9,11 +10,11 @@ import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from api_client import chorus_retry
-from dlq_writer import write_dlq
+from dlq_writer import write_dlq, append_dlq
 from file_io import write_json, read_json
 
-CONTACT_ID = os.environ.get("CONTACT_ID", "")
-CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "")
+CONTACT_IDS = os.environ.get("CONTACT_IDS", "[]")
+CONTACT_EMAILS = os.environ.get("CONTACT_EMAILS", "[]")
 SENTINEL = {"transcript_available": False, "conversations": []}
 CHORUS_ID_PATTERN = re.compile(r"chorus\.ai/meeting/([\w-]+)")
 
@@ -77,29 +78,42 @@ def fetch_chorus_transcripts(chorus_ids: list, token: str) -> dict:
 
 
 def main():
-    print(f"[fetch_chorus] processing contact_id={CONTACT_ID}", flush=True)
-    hubspot_data = read_json("hubspot_contact.json")
-    meetings = hubspot_data.get("meeting_engagements", [])
-    chorus_ids = extract_chorus_ids(meetings)
-    print(f"[fetch_chorus] found {len(chorus_ids)} Chorus IDs", flush=True)
-    if not chorus_ids:
-        write_json("chorus_transcripts.json", SENTINEL)
-        print("[fetch_chorus] no Chorus IDs — wrote sentinel", flush=True)
-        return
+    contact_ids = json.loads(os.environ.get("CONTACT_IDS", "[]"))
+    contact_emails_list = json.loads(os.environ.get("CONTACT_EMAILS", "[]"))
+    email_map = dict(zip(contact_ids, contact_emails_list))
+
+    hubspot_data = read_json("hubspot_contacts.json")
     token = os.environ.get("CHORUS_API_TOKEN", "")
-    if not token:
-        print("[fetch_chorus] WARNING: CHORUS_API_TOKEN not set — writing sentinel", flush=True)
-        write_json("chorus_transcripts.json", SENTINEL)
-        return
-    result = fetch_chorus_transcripts(chorus_ids, token)
-    write_json("chorus_transcripts.json", result)
-    print(f"[fetch_chorus] transcript_available={result['transcript_available']}, conversations={len(result['conversations'])}", flush=True)
+
+    results = {"_contact_ids": contact_ids}
+
+    for contact_id in contact_ids:
+        contact_data = hubspot_data.get(contact_id, {})
+        meetings = contact_data.get("meeting_engagements", [])
+        chorus_ids = extract_chorus_ids(meetings)
+        print(f"[fetch_chorus] contact_id={contact_id}: found {len(chorus_ids)} Chorus IDs", flush=True)
+
+        if not chorus_ids or not token:
+            if not token and chorus_ids:
+                print(f"[fetch_chorus] WARNING: CHORUS_API_TOKEN not set — writing sentinel for {contact_id}", flush=True)
+            results[contact_id] = SENTINEL
+        else:
+            results[contact_id] = fetch_chorus_transcripts(chorus_ids, token)
+
+    write_json("chorus_transcripts.json", results)
+    print(f"[fetch_chorus] chorus_transcripts.json written for {len(contact_ids)} contacts", flush=True)
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        write_dlq(CONTACT_ID, CONTACT_EMAIL, "fetch_chorus", str(e))
-        write_json("chorus_transcripts.json", SENTINEL)
+        # Write sentinel for all contacts on catastrophic failure
+        try:
+            contact_ids = json.loads(os.environ.get("CONTACT_IDS", "[]"))
+            contact_emails_list = json.loads(os.environ.get("CONTACT_EMAILS", "[]"))
+            for cid, cem in zip(contact_ids, contact_emails_list):
+                append_dlq(cid, cem, "fetch_chorus", str(e))
+        except Exception:
+            pass
         raise SystemExit(1)

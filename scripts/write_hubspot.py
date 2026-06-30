@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """write_hubspot.py — Phase 5: write 8 email subjects, bodies, generated date, and CRM note to HubSpot."""
+import json
 import os
 import sys
 from datetime import datetime, timezone, date
@@ -11,11 +12,11 @@ from tenacity import retry, retry_if_exception
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from api_client import hubspot_retry
-from dlq_writer import write_dlq
-from file_io import read_json
+from dlq_writer import write_dlq, append_dlq
+from file_io import read_json, write_json
 
-CONTACT_ID = os.environ.get("CONTACT_ID", "")
-CONTACT_EMAIL = os.environ.get("CONTACT_EMAIL", "")
+CONTACT_IDS = os.environ.get("CONTACT_IDS", "[]")
+CONTACT_EMAILS = os.environ.get("CONTACT_EMAILS", "[]")
 
 EMAIL_PROPS = {i: (f"subject_{i}", f"email_{i}") for i in range(1, 9)}
 
@@ -96,63 +97,77 @@ def build_note_body(output):
 
 
 def main():
-    write_dlq(CONTACT_ID, CONTACT_EMAIL, "write_hubspot", "Script started")
+    contact_ids = json.loads(os.environ.get("CONTACT_IDS", "[]"))
+    contact_emails_list = json.loads(os.environ.get("CONTACT_EMAILS", "[]"))
+    email_map = dict(zip(contact_ids, contact_emails_list))
 
-    output = read_json("campaign_output.json")
-    print(f"[write_hubspot] campaign_output.json loaded: keys={list(output.keys())}")
+    output_batch = read_json("campaign_output.json")
 
     client = hubspot.Client.create(access_token=os.environ["HUBSPOT_API_KEY"])
     headers = {"Authorization": f"Bearer {os.environ['HUBSPOT_API_KEY']}"}
 
-    properties = {}
-    for i, (subj_prop, body_prop) in EMAIL_PROPS.items():
-        email = output.get(f"email_{i}")
-        if not email:
+    failures = []
+
+    for contact_id in contact_ids:
+        contact_email = email_map.get(contact_id, "")
+        output = output_batch.get(contact_id)
+        if not output:
+            print(f"[write_hubspot] SKIP contact_id={contact_id} — no output in campaign_output.json (may have failed earlier)", flush=True)
             continue
-        if isinstance(email, dict):
-            properties[subj_prop] = safe_truncate(email.get("subject") or "", 1024)
-            body = (email.get("body") or "").replace("\n", "<br>")
-            properties[body_prop] = safe_truncate(body, 65000)
-        else:
-            properties[body_prop] = safe_truncate(str(email), 65000)
-
-    properties["asotos_generated_date"] = date.today().isoformat()
-
-    print(f"[write_hubspot] Properties to write ({len(properties)}): {list(properties.keys())}")
-
-    try:
-        _hs_update(client, CONTACT_ID, SimplePublicObjectInput(properties=properties))
-        print(f"[write_hubspot] Contact {CONTACT_ID} updated ({len(properties)} fields)")
 
         try:
-            note_body = build_note_body(output)
-            note_payload = {
-                "properties": {
-                    "hs_note_body": note_body,
-                    "hs_timestamp": str(int(datetime.now(timezone.utc).timestamp() * 1000)),
-                },
-                "associations": [
-                    {
-                        "to": {"id": str(CONTACT_ID)},
+            properties = {}
+            for i, (subj_prop, body_prop) in EMAIL_PROPS.items():
+                email = output.get(f"email_{i}")
+                if not email:
+                    continue
+                if isinstance(email, dict):
+                    properties[subj_prop] = safe_truncate(email.get("subject") or "", 1024)
+                    body = (email.get("body") or "").replace("\n", "<br>")
+                    properties[body_prop] = safe_truncate(body, 65000)
+                else:
+                    properties[body_prop] = safe_truncate(str(email), 65000)
+            properties["asotos_generated_date"] = date.today().isoformat()
+
+            _hs_update(client, contact_id, SimplePublicObjectInput(properties=properties))
+            print(f"[write_hubspot] contact_id={contact_id} updated ({len(properties)} fields)", flush=True)
+
+            try:
+                note_body = build_note_body(output)
+                note_payload = {
+                    "properties": {
+                        "hs_note_body": note_body,
+                        "hs_timestamp": str(int(datetime.now(timezone.utc).timestamp() * 1000)),
+                    },
+                    "associations": [{
+                        "to": {"id": str(contact_id)},
                         "types": [{"associationCategory": "HUBSPOT_DEFINED", "associationTypeId": 202}],
-                    }
-                ],
-            }
-            note_resp = _hs_post_note(headers, note_payload)
-            print(f"[write_hubspot] Note created: ID {note_resp.json().get('id')}")
+                    }],
+                }
+                note_resp = _hs_post_note(headers, note_payload)
+                print(f"[write_hubspot] Note created for contact_id={contact_id}: ID {note_resp.json().get('id')}", flush=True)
+            except Exception as e:
+                print(f"[write_hubspot] WARNING: note creation failed for contact_id={contact_id} (properties written): {e}", file=sys.stderr)
+
         except Exception as e:
-            print(f"[write_hubspot] WARNING: note creation failed (properties already written): {e}", file=sys.stderr)
+            print(f"[write_hubspot] ERROR contact_id={contact_id}: {e}", file=sys.stderr, flush=True)
+            append_dlq(contact_id, contact_email, "write_hubspot", str(e))
+            failures.append(contact_id)
 
-        print(f"[write_hubspot] Write-back complete: {len(properties)} properties + note on contact {CONTACT_ID}")
-
-    except ApiException as exc:
-        write_dlq(CONTACT_ID, CONTACT_EMAIL, "write_hubspot", str(exc))
-        raise
+    print(f"[write_hubspot] done: {len(contact_ids) - len(failures)}/{len(contact_ids)} succeeded", flush=True)
+    if failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:
-        write_dlq(CONTACT_ID, CONTACT_EMAIL, "write_hubspot", str(exc))
+    except SystemExit:
+        raise
+    except Exception as e:
+        try:
+            for cid, cem in zip(json.loads(CONTACT_IDS), json.loads(CONTACT_EMAILS)):
+                append_dlq(cid, cem, "write_hubspot", str(e))
+        except Exception:
+            pass
         raise SystemExit(1)
