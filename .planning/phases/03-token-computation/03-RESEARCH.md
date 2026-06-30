@@ -805,27 +805,19 @@ This section is authoritative — Phase 2 planning MUST produce `hubspot_contact
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **HubSpot property names for external tokens**
-   - What we know: `industry.market_intelligence` and `company.observable_signals` are pre-populated externally as HubSpot contact properties (REQUIREMENTS.md Out of Scope)
-   - What's unclear: The exact internal HubSpot property names (underscored API names, not display labels)
-   - Recommendation: Phase 2 plan must define these. Assumed: `industry_market_intelligence` and `company_observable_signals`. Phase 3 defaults to empty string if absent.
+1. **HubSpot property names for external tokens** — RESOLVED (assumed names with empty-string fallback)
+   - Resolution: Use `industry_market_intelligence` and `company_observable_signals` as HubSpot internal property names. If absent from `hubspot_contact.json`, Phase 3 defaults to empty string — these tokens are pre-populated externally and their absence is not a pipeline failure.
 
-2. **Phase 2 output contract for `createdate` vs `createdAt`**
-   - What we know: HubSpot v3 API returns top-level `createdAt` on contact objects; `createdate` is also available as a property
-   - What's unclear: Which one Phase 2 will surface and under which key in `hubspot_contact.json`
-   - Recommendation: Phase 2 plan should surface `createdAt` at the top level. Phase 3 falls back to `properties.createdate.value` if top-level is absent.
+2. **Phase 2 output contract for `createdate` vs `createdAt`** — RESOLVED (top-level `createdAt`, property fallback)
+   - Resolution: Phase 3 reads `data["createdAt"]` for years_in_crm computation, with fallback to `data["properties"].get("createdate", {}).get("value")`. This handles either format Phase 2 may produce.
 
-3. **Chorus transcript object schema**
-   - What we know: The sentinel format is defined; the success format is inferred from Chorus v3/engagements endpoint patterns
-   - What's unclear: Exact keys in the transcript object (`date`, `title`, `transcript`)
-   - Recommendation: Phase 2 smoke test confirms keys. Phase 3 uses `.get()` with defaults to handle field-name variance.
+3. **Chorus transcript object schema** — RESOLVED (use `.get()` with defaults)
+   - Resolution: Phase 3 accesses all transcript fields via `.get("title", "")`, `.get("date", "")`, `.get("transcript", "")`. Field-name variance from the Phase 2 smoke test is handled gracefully without code changes.
 
-4. **Outreach attempt definition boundary**
-   - What we know: TOK-03 says "count of distinct outreach attempts from engagement history"
-   - What's unclear: Whether CALL engagements (phone calls not linked to Chorus) are in the Phase 2 output
-   - Recommendation: Phase 3 plan counts outbound emails + meetings. If Phase 2 also delivers calls array, add `len(calls)` to the count. Document in plan.
+4. **Outreach attempt definition boundary** — RESOLVED (outbound emails + all meetings)
+   - Resolution: TOK-03 counts len(outbound emails where direction != INCOMING_EMAIL) + len(meetings). Phase 2 delivers no calls array (not in ROADMAP requirements). This count is documented in the plan for future extension.
 
 ---
 

@@ -1,0 +1,97 @@
+name: ASOTOS Campaign Generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      contact_id:
+        description: HubSpot contact ID
+        required: true
+        type: string
+      contact_email:
+        description: HubSpot contact email (for logging)
+        required: true
+        type: string
+
+jobs:
+  generate-campaign:
+    runs-on: ubuntu-latest
+    env:
+      CONTACT_ID: ${{ inputs.contact_id }}
+      CONTACT_EMAIL: ${{ inputs.contact_email }}
+      HUBSPOT_API_KEY: ${{ secrets.HUBSPOT_API_KEY }}
+      CHORUS_API_TOKEN: ${{ secrets.CHORUS_API_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+      RUNNER_TEMP: ${{ runner.temp }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch HubSpot contact
+        run: python scripts/fetch_hubspot.py
+
+      - name: Fetch Chorus transcripts
+        run: python scripts/fetch_chorus.py
+
+      - name: Compute campaign tokens
+        run: python scripts/compute_campaign_tokens.py
+
+      - name: Generate campaign
+        run: python scripts/generate_campaign.py
+
+      - name: Write campaign to HubSpot
+        run: python scripts/write_hubspot.py
+
+      - name: Upload output artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: campaign-output-${{ inputs.contact_id }}
+          path: ${{ runner.temp }}/campaign_output.json
+          retention-days: 7
+
+      - name: Copy failed contacts log
+        if: failure()
+        run: cp "${{ runner.temp }}/failed_contacts.json" failed_contacts.json 2>/dev/null || echo '{}' > failed_contacts.json
+
+      - name: Upload failure artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-contacts-${{ inputs.contact_id }}
+          path: failed_contacts.json
+          retention-days: 7
+
+      - name: Notify Teams on failure
+        if: failure()
+        run: |
+          FAILED_STEP=$(cat "${{ runner.temp }}/failed_contacts.json" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('failed_step','unknown'))" 2>/dev/null || echo "unknown")
+          ERROR_MSG=$(cat "${{ runner.temp }}/failed_contacts.json" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error_message','')[:300])" 2>/dev/null || echo "")
+          CONTACT_EMAIL="${{ inputs.contact_email }}"
+          curl -s -X POST "${{ secrets.TEAMS_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"@type\": \"MessageCard\",
+              \"@context\": \"https://schema.org/extensions\",
+              \"summary\": \"ASOTOS pipeline failed\",
+              \"themeColor\": \"FF0000\",
+              \"title\": \"ASOTOS pipeline failed — ${CONTACT_EMAIL}\",
+              \"sections\": [{
+                \"facts\": [
+                  {\"name\": \"Contact\", \"value\": \"${CONTACT_EMAIL}\"},
+                  {\"name\": \"Failed step\", \"value\": \"${FAILED_STEP}\"},
+                  {\"name\": \"Error\", \"value\": \"${ERROR_MSG}\"},
+                  {\"name\": \"Run log\", \"value\": \"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}
+                ]
+              }]
+            }"

@@ -44,11 +44,11 @@ Plans:
   2. Meeting notes containing a Chorus URL cause `chorus_transcripts.json` to contain the fetched transcript; meeting notes without a Chorus URL produce the explicit sentinel `{"transcript_available": false}`
   3. A Chorus 404 or 401 does not fail the pipeline — the workflow step exits 0 with the sentinel written
   4. Engagement history counts in the output JSON match what is visible in the HubSpot contact timeline (spot-check)
-**Plans:** TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 02-01: `fetch_hubspot.py` — properties, history, deals, owners, updatedAt
-- [ ] 02-02: `fetch_chorus.py` — regex extraction, transcript fetch, sentinel fallback
+- [ ] 02-01-PLAN.md — `fetch_hubspot.py` — properties, history, deals, owners, updatedAt
+- [ ] 02-02-PLAN.md — `fetch_chorus.py` — regex extraction, transcript fetch, sentinel fallback
 
 ### Phase 3: Token Computation
 **Goal:** `compute_campaign_tokens.py` reads the raw fetch outputs and produces a validated `campaign_tokens.json` containing every token the prompt requires, with freshness tiers applied and strict undefined checking enforced
@@ -59,10 +59,10 @@ Plans:
   2. `contact.years_in_crm` and `contact.outreach_attempt_count` are computed correctly against known test contact values
   3. `crm.full_activity_history` contains labelled blocks for emails, meetings, and Chorus transcripts in the correct format
   4. Running the script with a deliberately missing required token causes the pipeline step to exit non-zero with an explicit error message identifying the missing token (StrictUndefined enforced)
-**Plans:** TBD
+**Plans:** 1 plan
 
 Plans:
-- [ ] 03-01: `compute_campaign_tokens.py` — secondary contact, years in CRM, outreach count, activity history, StrictUndefined substitution
+- [ ] 03-01-PLAN.md — `compute_campaign_tokens.py` — secondary contact, years in CRM, outreach count, activity history, StrictUndefined substitution
 
 ### Phase 4: Campaign Generation
 **Goal:** `generate_campaign.py` assembles the populated prompt, calls `claude-sonnet-4-6`, validates the JSON response against schema, checks `stop_reason`, post-processes em/en dashes, and writes `campaign_output.json` — rejecting and retrying on any validation failure
